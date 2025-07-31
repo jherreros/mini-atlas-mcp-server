@@ -325,11 +325,3 @@ export function isDevelopment(): boolean {
 export function isInCluster(): boolean {
   return !!process.env['KUBERNETES_SERVICE_HOST'];
 }
-
-/**
- * Gets the MCP HTTP port from environment or default
- */
-export function getMCPPort(): number {
-  const port = process.env['MCP_HTTP_PORT'];
-  return port ? parseInt(port, 10) : 3000;
-}
