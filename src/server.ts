@@ -709,23 +709,32 @@ class MiniAtlasMCPServer {
   }
 }
 
+
 // Start the server
-const server = new MiniAtlasMCPServer();
+async function main() {
+  const server = new MiniAtlasMCPServer();
 
-// Graceful shutdown handling
-process.on('SIGTERM', async () => {
-  logger.info('Received SIGTERM, shutting down gracefully...');
-  await server.shutdown();
-  process.exit(0);
-});
+  // Graceful shutdown handling
+  const shutdown = async () => {
+    logger.info('Shutting down gracefully...');
+    await server.shutdown();
+    process.exit(0);
+  };
 
-process.on('SIGINT', async () => {
-  logger.info('Received SIGINT, shutting down gracefully...');
-  await server.shutdown();
-  process.exit(0);
-});
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 
-server.run().catch((error) => {
-  logger.error('Server failed to start:', { error });
-  process.exit(1);
-});
+  try {
+    await server.run();
+    // If in stdio mode, we need to keep the process alive.
+    if (!process.env['MCP_HTTP_PORT']) {
+      // This promise never resolves, keeping the process alive.
+      await new Promise(() => {});
+    }
+  } catch (error) {
+    logger.error('Server failed to start:', { error });
+    process.exit(1);
+  }
+}
+
+main();

@@ -6,12 +6,16 @@
   "bin": {
     "mcp-server": "dist/server.js"
   },
+  "files": [
+    "dist"
+  ],
   "type": "module",
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "jest",
-    "dev": "MCP_HTTP_PORT=3000 node --loader ts-node/esm src/server.ts"
+    "dev": "MCP_HTTP_PORT=3000 node --loader ts-node/esm src/server.ts",
+    "prepare": "npm run build"
   },
   "keywords": [],
   "author": "",

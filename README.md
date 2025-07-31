@@ -4,6 +4,19 @@ A Model Context Protocol (MCP) server that provides a natural language interface
 
 ## 🚀 Quick Start
 
+Use this configuration in the settings of your preferred tool:
+
+```json
+{
+  "mcpServers": {
+    "mini-atlas": {
+      "command": "npx",
+      "args": ["github:jherreros/mini-atlas-mcp-server"]
+    }
+  }
+}
+```
+
 **Talk to your infrastructure in plain English:**
 
 > "Create a workspace for the frontend team and deploy their React app at dashboard.company.com"
