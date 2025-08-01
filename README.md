@@ -29,6 +29,7 @@ Use this configuration in the settings of your preferred tool:
 
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
+- [Installation & Development](#installation--development)
 - [Architecture](#architecture)
 - [Available Tools](#available-tools)
 - [Usage Guide](#usage-guide)
@@ -48,6 +49,8 @@ Mini-Atlas MCP Server bridges the gap between natural language and Kubernetes op
 - **Comprehensive Platform**: Deploy apps, provision databases, create messaging topics
 - **Safety First**: Built-in validation and naming conventions
 - **Kubernetes Native**: Leverages operators and custom resources
+- **Production Ready**: Full resource lifecycle management with status monitoring and cleanup
+- **Type Safe**: Comprehensive error handling and input validation
 
 ### What You Can Do
 
@@ -57,6 +60,8 @@ Mini-Atlas MCP Server bridges the gap between natural language and Kubernetes op
 | **App Deployment** | "Deploy the user-service API at api.company.com with 3 replicas" |
 | **Database Setup** | "Provision PostgreSQL for the analytics team" |
 | **Event Streaming** | "Create Kafka topics for user events and notifications" |
+| **Resource Monitoring** | "Get the status of the user-api application in production" |
+| **Resource Cleanup** | "Delete the old-service from the legacy workspace" |
 | **Platform Monitoring** | "Show me cluster health and all running services" |
 
 ## 📋 Prerequisites
@@ -83,23 +88,59 @@ Your Mini-Atlas cluster should have these operators installed:
 - MCP server endpoint accessible to your AI assistant
 - Appropriate RBAC permissions for resource management
 
-## 🏗️ Architecture
+## 🔧 Installation & Development
 
+### Quick Start (NPX)
+Use the server directly from GitHub (recommended for most users):
+
+```json
+{
+  "mcpServers": {
+    "mini-atlas": {
+      "command": "npx",
+      "args": ["github:jherreros/mini-atlas-mcp-server"]
+    }
+  }
+}
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐
-│   AI Assistant  │◄──►│  MCP Server      │◄──►│  Kubernetes API     │
-│   (Claude/GPT)  │    │  (HTTP/STDIO)    │    │                     │
-└─────────────────┘    └──────────────────┘    └─────────────────────┘
-                                │                          │
-                                ▼                          ▼
-                       ┌──────────────────┐    ┌─────────────────────┐
-                       │  Atlas Resources │    │     Operators       │
-                       │  - Workspace     │    │  - KRO              │
-                       │  - Web App       │    │  - CloudNativePG    │
-                       │  - Infrastructure│    │  - Strimzi          │
-                       │  - Topic         │    │  - Nginx Ingress    │
-                       └──────────────────┘    └─────────────────────┘
-```
+
+### Local Development
+
+1. **Clone and Install**
+   ```bash
+   git clone https://github.com/jherreros/mini-atlas-mcp-server.git
+   cd mini-atlas-mcp-server
+   npm install
+   ```
+
+2. **Build the Project**
+   ```bash
+   npm run build
+   ```
+
+3. **Run Tests**
+   ```bash
+   npm test
+   ```
+
+4. **Start Development Server**
+   ```bash
+   npm run dev
+   ```
+
+### Configuration
+
+The server automatically detects its environment:
+
+- **In-Cluster**: Uses service account and in-cluster config
+- **Local Development**: Uses your local kubeconfig file
+
+### Environment Variables
+
+- `KUBERNETES_SERVICE_HOST`: Auto-detected when running in cluster
+- `KUBECONFIG`: Path to kubeconfig file (for local development)
+- `LOG_LEVEL`: Logging level (debug, info, warn, error) - default: info
+- `NODE_ENV`: Environment mode (development, production)
 
 ## 🛠️ Available Tools
 
@@ -111,6 +152,8 @@ Your Mini-Atlas cluster should have these operators installed:
 | `deploy_webapp` | Application deployment | `name`, `namespace`, `image`, `host` |
 | `create_infrastructure` | Database and cache provisioning | `name`, `namespace`, `database` |
 | `create_topic` | Kafka messaging setup | `name`, `namespace` |
+| `get_resource_status` | Get detailed resource status | `name`, `type`, `namespace` |
+| `delete_resource` | Safely delete Atlas resources | `name`, `type`, `namespace` |
 | `list_resources` | Resource discovery and inventory | `type`, `namespace` |
 | `get_cluster_status` | Platform health monitoring | None |
 
@@ -144,6 +187,13 @@ Deploys containerized web applications with full production features.
 - `host` (required): Public hostname (e.g., "api.company.com")
 - `tag` (optional): Image tag (default: "latest")
 - `replicas` (optional): Instance count (default: 1)
+- `port` (optional): Container port (default: 8080)
+- `env` (optional): Environment variables as key-value pairs
+- `resources` (optional): CPU and memory requests/limits
+  - `requests.cpu` (optional): CPU request (e.g., "100m")
+  - `requests.memory` (optional): Memory request (e.g., "128Mi")
+  - `limits.cpu` (optional): CPU limit (e.g., "500m")
+  - `limits.memory` (optional): Memory limit (e.g., "512Mi")
 
 #### 🗄️ `create_infrastructure`
 Provisions managed databases and caching layers.
@@ -158,6 +208,10 @@ Provisions managed databases and caching layers.
 - `name` (required): Infrastructure stack name
 - `namespace` (required): Target workspace
 - `database` (required): Database name
+- `databaseVersion` (optional): PostgreSQL version (default: "15")
+- `storageSize` (optional): Storage size (default: "10Gi")
+- `redisEnabled` (optional): Enable Redis cache (default: true)
+- `backupEnabled` (optional): Enable automated backups (default: true)
 
 #### 📨 `create_topic`
 Sets up Kafka topics for event-driven architecture.
@@ -170,6 +224,36 @@ Sets up Kafka topics for event-driven architecture.
 **Parameters:**
 - `name` (required): Topic name
 - `namespace` (required): Target workspace
+- `partitions` (optional): Number of partitions (default: 3)
+- `replicationFactor` (optional): Replication factor (default: 3)
+- `retentionMs` (optional): Message retention in milliseconds
+
+#### 🔍 `get_resource_status`
+Get detailed status information for a specific Atlas resource.
+
+**Returns:**
+- Resource configuration
+- Current status
+- Health information
+- Related resources
+
+**Parameters:**
+- `name` (required): Resource name
+- `type` (required): Resource type ("workspace", "webapp", "infrastructure", "topic")
+- `namespace` (optional): Namespace (required for namespaced resources)
+
+#### 🗑️ `delete_resource`
+Safely delete Atlas resources with proper cleanup.
+
+**What it does:**
+- Removes the specified Atlas resource
+- Cleans up dependent resources
+- Maintains data integrity
+
+**Parameters:**
+- `name` (required): Resource name
+- `type` (required): Resource type ("workspace", "webapp", "infrastructure", "topic")
+- `namespace` (optional): Namespace (for namespaced resources)
 
 #### 📊 `list_resources`
 Discovers and inventories platform resources.
@@ -258,6 +342,18 @@ Provides cluster health and capacity information.
 
 **Result**: Complete workspace inventory and resource usage.
 
+#### 9. Resource Details
+**Command**:
+> "Get the detailed status of the user-api application in the backend workspace"
+
+**Result**: Complete resource configuration, health status, and related information.
+
+#### 10. Resource Management
+**Command**:
+> "Delete the old-api application from the legacy workspace as it's no longer needed"
+
+**Result**: Safe removal of the application with proper cleanup.
+
 ## 🎯 Advanced Examples
 
 ### Batch Operations
@@ -338,7 +434,7 @@ Provides cluster health and capacity information.
 **Symptoms**: Can't reach application at specified hostname
 
 **Debugging**:
-> "Check the status of the user-api application in the backend workspace and show me its ingress configuration"
+> "Get the status of the user-api application in the backend workspace"
 
 **Common causes**:
 - DNS not configured for hostname
@@ -349,7 +445,7 @@ Provides cluster health and capacity information.
 **Symptoms**: Application can't connect to database
 
 **Debugging**:
-> "Show me the database status and connection secrets for the user-db in the backend workspace"
+> "Get the status of the backend-infrastructure in the backend workspace"
 
 **Common causes**:
 - Database still initializing
@@ -372,7 +468,9 @@ Provides cluster health and capacity information.
 - **Cluster Health**: "What's the current cluster status?"
 - **Resource Inventory**: "List all resources of type webapp"
 - **Workspace Status**: "Show me everything in the frontend-team workspace"
-- **Application Details**: "Get the status of the user-api application"
+- **Resource Details**: "Get the status of the user-api webapp in the backend workspace"
+- **Infrastructure Status**: "Get the status of the main-db infrastructure in the production workspace"
+- **Resource Cleanup**: "Delete the old-service webapp from the legacy workspace"
 
 ## 📚 API Reference
 
@@ -446,7 +544,35 @@ When running in HTTP mode (in-cluster deployment):
 
 ---
 
-## 🤝 Contributing
+## � Quality & Testing
+
+The Mini-Atlas MCP Server is built with reliability and safety in mind:
+
+### Testing Coverage
+- **29 comprehensive tests** covering all functionality
+- **Validation functions**: Kubernetes naming conventions, resource validation
+- **Utility functions**: Formatting, parsing, retry logic
+- **Integration tests**: End-to-end functionality verification
+
+### Quality Assurance
+- **Type Safety**: Strict TypeScript with exact optional property types
+- **Error Handling**: Comprehensive error types (`ValidationError`, `KubernetesError`, `ResourceNotFoundError`)
+- **Input Validation**: All parameters validated before resource creation
+- **Build Process**: Automated with ES module compatibility fixes
+
+### Development Tools
+```bash
+# Run the full test suite
+npm test
+
+# Build with type checking
+npm run build
+
+# Development mode with hot reload
+npm run dev
+```
+
+## �🤝 Contributing
 
 Mini-Atlas MCP Server is part of the broader [Mini-Atlas](https://github.com/jherreros/mini-atlas) platform. For questions, issues, or contributions, please refer to the main Mini-Atlas documentation.
 

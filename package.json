@@ -11,7 +11,7 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/fix-imports.mjs",
     "start": "node dist/server.js",
     "test": "jest",
     "dev": "node --loader ts-node/esm src/server.ts",

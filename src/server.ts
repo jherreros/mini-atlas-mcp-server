@@ -1,4 +1,20 @@
 #!/usr/bin/env node
+/**
+ * Mini-Atlas MCP Server
+ * 
+ * A Model Context Protocol server for managing Atlas resources on Kubernetes.
+ * 
+ * Environment Variables:
+ * - KUBERNETES_SERVICE_HOST: Auto-detected when running in cluster
+ * - KUBECONFIG: Path to kubeconfig file (for local development)
+ * - LOG_LEVEL: Logging level (debug, info, warn, error) - default: info
+ * - NODE_ENV: Environment mode (development, production)
+ * 
+ * Usage:
+ * - Local development: node dist/server.js
+ * - In MCP client: Configure as stdio transport server
+ */
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -8,19 +24,37 @@ import {
   ListToolsRequestSchema,
   McpError,
   ReadResourceRequestSchema,
+  CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import * as k8s from '@kubernetes/client-node';
 import { logger } from './logger.js';
-
-interface AtlasResource {
-  apiVersion: string;
-  kind: string;
-  metadata: {
-    name: string;
-    namespace?: string;
-  };
-  spec: any;
-}
+import {
+  AtlasResource,
+  CreateWorkspaceArgs,
+  DeployWebAppArgs,
+  CreateInfrastructureArgs,
+  CreateTopicArgs,
+  ListResourcesArgs,
+  ClusterStatus,
+  MCPResponse,
+  KubernetesError,
+  ValidationError,
+  ResourceNotFoundError
+} from './types.js';
+import {
+  validateResourceName,
+  validateNamespace,
+  validateImageReference,
+  validateHostname,
+  validateReplicas,
+  validateEnvironmentVariables,
+  createAtlasResource,
+  formatResourceList,
+  formatResource,
+  getResourcePlural,
+  parseApiVersion,
+  retry
+} from './utils.js';
 
 class MiniAtlasMCPServer {
   private server: Server;
@@ -58,7 +92,21 @@ class MiniAtlasMCPServer {
     this.k8sApi = this.k8sConfig.makeApiClient(k8s.CoreV1Api);
     this.k8sCustomApi = this.k8sConfig.makeApiClient(k8s.CustomObjectsApi);
 
+    // Initialize and test connection
+    this.initializeKubernetesClient().catch(error => {
+      logger.error("Failed to initialize Kubernetes client:", error);
+      process.exit(1);
+    });
+
     this.setupHandlers();
+  }
+
+  private async initializeKubernetesClient(): Promise<void> {
+    await retry(async () => {
+      // Test the connection
+      await this.k8sApi.listNamespace();
+      logger.info("Successfully connected to Kubernetes API");
+    }, 3, 1000);
   }
 
   private setupHandlers() {
@@ -72,9 +120,14 @@ class MiniAtlasMCPServer {
             inputSchema: {
               type: "object",
               properties: {
-                name: {
-                  type: "string",
-                  description: "Workspace name"
+                name: { type: "string", description: "Workspace name" },
+                description: { type: "string", description: "Workspace description" },
+                team: { type: "string", description: "Team name" },
+                environment: { 
+                  type: "string", 
+                  enum: ["development", "staging", "production"],
+                  description: "Environment type", 
+                  default: "development" 
                 }
               },
               required: ["name"]
@@ -91,7 +144,33 @@ class MiniAtlasMCPServer {
                 image: { type: "string", description: "Container image" },
                 tag: { type: "string", description: "Image tag", default: "latest" },
                 replicas: { type: "number", description: "Number of replicas", default: 1 },
-                host: { type: "string", description: "Ingress hostname" }
+                host: { type: "string", description: "Ingress hostname" },
+                port: { type: "number", description: "Container port", default: 8080 },
+                env: { 
+                  type: "object",
+                  description: "Environment variables",
+                  additionalProperties: { type: "string" }
+                },
+                resources: {
+                  type: "object",
+                  description: "Resource requests and limits",
+                  properties: {
+                    requests: {
+                      type: "object",
+                      properties: {
+                        cpu: { type: "string", description: "CPU request (e.g., '100m')" },
+                        memory: { type: "string", description: "Memory request (e.g., '128Mi')" }
+                      }
+                    },
+                    limits: {
+                      type: "object", 
+                      properties: {
+                        cpu: { type: "string", description: "CPU limit (e.g., '500m')" },
+                        memory: { type: "string", description: "Memory limit (e.g., '512Mi')" }
+                      }
+                    }
+                  }
+                }
               },
               required: ["name", "namespace", "image", "host"]
             }
@@ -104,7 +183,11 @@ class MiniAtlasMCPServer {
               properties: {
                 name: { type: "string", description: "Infrastructure name" },
                 namespace: { type: "string", description: "Target namespace" },
-                database: { type: "string", description: "Database name" }
+                database: { type: "string", description: "Database name" },
+                databaseVersion: { type: "string", description: "PostgreSQL version", default: "15" },
+                storageSize: { type: "string", description: "Storage size (e.g., '10Gi')", default: "10Gi" },
+                redisEnabled: { type: "boolean", description: "Enable Redis cache", default: true },
+                backupEnabled: { type: "boolean", description: "Enable automated backups", default: true }
               },
               required: ["name", "namespace", "database"]
             }
@@ -116,9 +199,38 @@ class MiniAtlasMCPServer {
               type: "object",
               properties: {
                 name: { type: "string", description: "Topic name" },
-                namespace: { type: "string", description: "Target namespace" }
+                namespace: { type: "string", description: "Target namespace" },
+                partitions: { type: "number", description: "Number of partitions", default: 3 },
+                replicationFactor: { type: "number", description: "Replication factor", default: 3 },
+                retentionMs: { type: "number", description: "Message retention in milliseconds" }
               },
               required: ["name", "namespace"]
+            }
+          },
+          {
+            name: "get_resource_status",
+            description: "Get detailed status of a specific Atlas resource",
+            inputSchema: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Resource name" },
+                type: { type: "string", enum: ["workspace", "webapp", "infrastructure", "topic"], description: "Resource type" },
+                namespace: { type: "string", description: "Namespace (required for namespaced resources)" }
+              },
+              required: ["name", "type"]
+            }
+          },
+          {
+            name: "delete_resource",
+            description: "Delete an Atlas resource",
+            inputSchema: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Resource name" },
+                type: { type: "string", enum: ["workspace", "webapp", "infrastructure", "topic"], description: "Resource type" },
+                namespace: { type: "string", description: "Namespace (for namespaced resources)" }
+              },
+              required: ["name", "type"]
             }
           },
           {
@@ -156,19 +268,25 @@ class MiniAtlasMCPServer {
       try {
         switch (name) {
           case "create_workspace":
-            return await this.createWorkspace(args as { name: string });
+            return await this.createWorkspace(args as unknown as CreateWorkspaceArgs);
           
           case "deploy_webapp":
-            return await this.deployWebApp(args as any);
+            return await this.deployWebApp(args as unknown as DeployWebAppArgs);
           
           case "create_infrastructure":
-            return await this.createInfrastructure(args as any);
+            return await this.createInfrastructure(args as unknown as CreateInfrastructureArgs);
           
           case "create_topic":
-            return await this.createTopic(args as any);
+            return await this.createTopic(args as unknown as CreateTopicArgs);
+
+          case "get_resource_status":
+            return await this.getResourceStatus(args as unknown as { name: string; type: string; namespace?: string });
+
+          case "delete_resource":
+            return await this.deleteResource(args as unknown as { name: string; type: string; namespace?: string });
           
           case "list_resources":
-            return await this.listResources(args as any);
+            return await this.listResources(args as unknown as ListResourcesArgs);
           
           case "get_cluster_status":
             return await this.getClusterStatus();
@@ -177,6 +295,15 @@ class MiniAtlasMCPServer {
             throw new McpError(ErrorCode.MethodNotFound, `Tool ${name} not found`);
         }
       } catch (error) {
+        if (error instanceof ValidationError) {
+          throw new McpError(ErrorCode.InvalidParams, error.message);
+        }
+        if (error instanceof ResourceNotFoundError) {
+          throw new McpError(ErrorCode.InvalidRequest, error.message);
+        }
+        if (error instanceof KubernetesError) {
+          throw new McpError(ErrorCode.InternalError, error.message);
+        }
         throw new McpError(
           ErrorCode.InternalError, 
           `Error executing tool ${name}: ${error instanceof Error ? error.message : String(error)}`
@@ -235,19 +362,18 @@ class MiniAtlasMCPServer {
   }
 
   // Tool implementations
-  private async createWorkspace(args: { name: string }) {
-    const workspace: AtlasResource = {
-      apiVersion: "kro.run/v1alpha1",
-      kind: "Workspace",
-      metadata: {
-        name: args.name
-      },
-      spec: {
-        name: args.name
-      }
-    };
+  private async createWorkspace(args: CreateWorkspaceArgs): Promise<CallToolResult> {
+    validateResourceName(args.name, 'Workspace');
+    
+    const workspace = createAtlasResource('Workspace', args.name, undefined, {
+      name: args.name,
+      description: args.description,
+      team: args.team,
+      environment: args.environment || 'development'
+    });
 
     await this.applyResource(workspace);
+    
     return {
       content: [{
         type: "text",
@@ -256,70 +382,76 @@ class MiniAtlasMCPServer {
     };
   }
 
-  private async deployWebApp(args: any) {
-    const webapp: AtlasResource = {
-      apiVersion: "kro.run/v1alpha1",
-      kind: "WebApplication",
-      metadata: {
-        name: args.name,
-        namespace: args.namespace
-      },
-      spec: {
-        name: args.name,
-        namespace: args.namespace,
-        image: args.image,
-        tag: args.tag || "latest",
-        replicas: args.replicas || 1,
-        host: args.host
-      }
-    };
+  private async deployWebApp(args: DeployWebAppArgs): Promise<CallToolResult> {
+    validateResourceName(args.name, 'WebApplication');
+    validateNamespace(args.namespace);
+    validateImageReference(args.image);
+    validateHostname(args.host);
+    
+    if (args.replicas !== undefined) {
+      validateReplicas(args.replicas);
+    }
+    
+    if (args.env) {
+      validateEnvironmentVariables(args.env);
+    }
+
+    const webapp = createAtlasResource('WebApplication', args.name, args.namespace, {
+      name: args.name,
+      namespace: args.namespace,
+      image: args.image,
+      tag: args.tag || "latest",
+      replicas: args.replicas || 1,
+      host: args.host,
+      port: args.port || 8080,
+      env: args.env,
+      resources: args.resources
+    });
 
     await this.applyResource(webapp);
     return {
       content: [{
         type: "text",
-        text: `Web application '${args.name}' deployed to namespace '${args.namespace}'`
+        text: `Web application '${args.name}' deployed to namespace '${args.namespace}' at ${args.host}`
       }]
     };
   }
 
-  private async createInfrastructure(args: any) {
-    const infra: AtlasResource = {
-      apiVersion: "kro.run/v1alpha1",
-      kind: "Infrastructure", 
-      metadata: {
-        name: args.name,
-        namespace: args.namespace
-      },
-      spec: {
-        name: args.name,
-        namespace: args.namespace,
-        database: args.database
-      }
-    };
+  private async createInfrastructure(args: CreateInfrastructureArgs): Promise<CallToolResult> {
+    validateResourceName(args.name, 'Infrastructure');
+    validateNamespace(args.namespace);
+    validateResourceName(args.database, 'Database');
+
+    const infra = createAtlasResource('Infrastructure', args.name, args.namespace, {
+      name: args.name,
+      namespace: args.namespace,
+      database: args.database,
+      databaseVersion: args.databaseVersion || "15",
+      storageSize: args.storageSize || "10Gi",
+      redisEnabled: args.redisEnabled !== false,
+      backupEnabled: args.backupEnabled !== false
+    });
 
     await this.applyResource(infra);
     return {
       content: [{
         type: "text",
-        text: `Infrastructure '${args.name}' created with database '${args.database}'`
+        text: `Infrastructure '${args.name}' created with database '${args.database}' in namespace '${args.namespace}'`
       }]
     };
   }
 
-  private async createTopic(args: any) {
-    const topic: AtlasResource = {
-      apiVersion: "kro.run/v1alpha1", 
-      kind: "Topic",
-      metadata: {
-        name: args.name,
-        namespace: args.namespace
-      },
-      spec: {
-        name: args.name,
-        namespace: args.namespace
-      }
-    };
+  private async createTopic(args: CreateTopicArgs): Promise<CallToolResult> {
+    validateResourceName(args.name, 'Topic');
+    validateNamespace(args.namespace);
+
+    const topic = createAtlasResource('Topic', args.name, args.namespace, {
+      name: args.name,
+      namespace: args.namespace,
+      partitions: args.partitions || 3,
+      replicationFactor: args.replicationFactor || 3,
+      retentionMs: args.retentionMs
+    });
 
     await this.applyResource(topic);
     return {
@@ -330,29 +462,95 @@ class MiniAtlasMCPServer {
     };
   }
 
-  private async listResources(args: { type: string; namespace?: string }) {
+  private async getResourceStatus(args: { name: string; type: string; namespace?: string }): Promise<CallToolResult> {
+    const kind = this.getKindFromType(args.type);
+    if (!kind) {
+      throw new ValidationError(`Invalid resource type: ${args.type}`);
+    }
+
+    const resource = await this.getAtlasResource(kind, args.name, args.namespace);
+    if (!resource) {
+      throw new ResourceNotFoundError(kind, args.name);
+    }
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(resource, null, 2)
+      }]
+    };
+  }
+
+  private async deleteResource(args: { name: string; type: string; namespace?: string }): Promise<CallToolResult> {
+    const kind = this.getKindFromType(args.type);
+    if (!kind) {
+      throw new ValidationError(`Invalid resource type: ${args.type}`);
+    }
+
+    const { group, version } = parseApiVersion('kro.run/v1alpha1');
+    const plural = getResourcePlural(kind);
+
+    try {
+      if (args.namespace) {
+        await this.k8sCustomApi.deleteNamespacedCustomObject({
+          group,
+          version,
+          namespace: args.namespace,
+          plural,
+          name: args.name
+        });
+      } else {
+        await this.k8sCustomApi.deleteClusterCustomObject({
+          group,
+          version,
+          plural,
+          name: args.name
+        });
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `${kind} '${args.name}' deleted successfully`
+        }]
+      };
+    } catch (error: any) {
+      if (error.response?.statusCode === 404) {
+        throw new ResourceNotFoundError(kind, args.name);
+      }
+      throw new KubernetesError(`Failed to delete ${kind}`, error);
+    }
+  }
+
+  private async listResources(args: ListResourcesArgs): Promise<CallToolResult> {
     const resources = await this.getAtlasResources(this.getKindFromType(args.type), args.namespace);
     
     return {
       content: [{
         type: "text",
-        text: JSON.stringify(resources, null, 2)
+        text: formatResourceList(resources)
       }]
     };
   }
 
-  private async getClusterStatus() {
+  private async getClusterStatus(): Promise<CallToolResult> {
     try {
       const nodes = await this.k8sApi.listNode();
       const namespaces = await this.k8sApi.listNamespace();
+      const atlasResources = await this.getAllAtlasResourceCounts();
       
-      const status = {
+      const status: ClusterStatus = {
         nodes: nodes.items.length,
         namespaces: namespaces.items.length,
         nodeStatus: nodes.items.map((node: k8s.V1Node) => ({
           name: node.metadata?.name,
-          ready: node.status?.conditions?.find((c: k8s.V1NodeCondition) => c.type === 'Ready')?.status === 'True'
-        }))
+          ready: node.status?.conditions?.find((c: k8s.V1NodeCondition) => c.type === 'Ready')?.status === 'True',
+          version: node.status?.nodeInfo?.kubeletVersion,
+          roles: Object.keys(node.metadata?.labels || {})
+            .filter(label => label.startsWith('node-role.kubernetes.io/'))
+            .map(label => label.replace('node-role.kubernetes.io/', ''))
+        })),
+        atlasResources
       };
 
       return {
@@ -362,39 +560,82 @@ class MiniAtlasMCPServer {
         }]
       };
     } catch (error) {
-      throw new Error(`Failed to get cluster status: ${error}`);
+      throw new KubernetesError('Failed to get cluster status', error);
     }
   }
 
   // Helper methods
   private async applyResource(resource: AtlasResource) {
-    const group = resource.apiVersion.split('/')[0]!;
-    const version = resource.apiVersion.split('/')[1]!;
+    const { group, version } = parseApiVersion(resource.apiVersion);
     
     try {
       await this.k8sCustomApi.createNamespacedCustomObject({
-        group: group,
-        version: version,
+        group,
+        version,
         namespace: resource.metadata.namespace ?? 'default',
-        plural: resource.kind.toLowerCase() + 's',
+        plural: getResourcePlural(resource.kind),
         body: resource,
-      }, {} /* optional ConfigurationOptions, like headers */);
-
+      });
+      logger.info(`Created ${formatResource(resource)}`);
     } catch (error: any) {
       if (error.response?.statusCode === 409) {
-        // Resource already exists, try to update
-        await this.k8sCustomApi.replaceNamespacedCustomObject({
-          group: group,
-          version: version,
-          namespace: resource.metadata.namespace || 'default', 
-          plural: resource.kind.toLowerCase() + 's',
-          name: resource.metadata.name!,
-          body: resource}
-        );
+        try {
+          await this.k8sCustomApi.replaceNamespacedCustomObject({
+            group,
+            version,
+            namespace: resource.metadata.namespace || 'default',
+            plural: getResourcePlural(resource.kind),
+            name: resource.metadata.name!,
+            body: resource
+          });
+          logger.info(`Updated ${formatResource(resource)}`);
+        } catch (updateError) {
+          throw new KubernetesError(`Failed to update ${resource.kind}`, updateError);
+        }
       } else {
-        throw error;
+        throw new KubernetesError(`Failed to create ${resource.kind}`, error);
       }
     }
+  }
+
+  private async getAtlasResource(kind: string, name: string, namespace?: string): Promise<AtlasResource | null> {
+    const { group, version } = parseApiVersion('kro.run/v1alpha1');
+    const plural = getResourcePlural(kind);
+
+    try {
+      const response = namespace 
+        ? await this.k8sCustomApi.getNamespacedCustomObject({group, version, namespace, plural, name})
+        : await this.k8sCustomApi.getClusterCustomObject({group, version, plural, name});
+      
+      return response.body as AtlasResource;
+    } catch (error: any) {
+      if (error.response?.statusCode === 404) {
+        return null;
+      }
+      throw new KubernetesError(`Failed to get ${kind}`, error);
+    }
+  }
+
+  private async getAllAtlasResourceCounts() {
+    const kinds = ['Workspace', 'WebApplication', 'Infrastructure', 'Topic'];
+    const counts: Record<string, number> = {};
+    
+    for (const kind of kinds) {
+      try {
+        const resources = await this.getAtlasResources(kind);
+        counts[kind.toLowerCase() + 's'] = resources.length;
+      } catch (error) {
+        logger.warn(`Failed to count ${kind} resources:`, { error });
+        counts[kind.toLowerCase() + 's'] = 0;
+      }
+    }
+    
+    return {
+      workspaces: counts['workspaces'] || 0,
+      applications: counts['webapplications'] || 0,
+      infrastructure: counts['infrastructures'] || 0,
+      topics: counts['topics'] || 0
+    };
   }
 
   private async getAtlasResources(kind?: string, namespace?: string) {

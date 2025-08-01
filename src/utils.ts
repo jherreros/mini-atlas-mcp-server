@@ -140,26 +140,10 @@ export function createAtlasResource(
     metadata.namespace = namespace;
   }
 
-  const metadata2: any = {
-    name,
-    labels: {
-      'app.kubernetes.io/managed-by': 'mini-atlas-mcp',
-      'mini-atlas.io/resource-type': kind.toLowerCase()
-    },
-    annotations: {
-      'mini-atlas.io/created-by': 'mcp-server',
-      'mini-atlas.io/created-at': new Date().toISOString()
-    }
-  };
-
-  if (namespace) {
-    metadata2.namespace = namespace;
-  }
-
   return {
     apiVersion: 'kro.run/v1alpha1',
     kind,
-    metadata: metadata2,
+    metadata,
     spec
   };
 }

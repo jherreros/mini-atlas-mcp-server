@@ -130,10 +130,10 @@ export interface ClusterStatus {
 }
 
 export interface NodeStatus {
-  name?: string;
+  name?: string | undefined;
   ready: boolean;
-  version?: string;
-  roles?: string[];
+  version?: string | undefined;
+  roles?: string[] | undefined;
 }
 
 export interface HealthStatus {
